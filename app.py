@@ -71,10 +71,14 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df["Due Month Dashboard"] = df["Due Date"].dt.strftime("%b-%Y")
 
         # Weekly planning columns
-        iso = df["Due Date"].dt.isocalendar()
-        df["Due Year"] = iso["year"]
-        df["Due Week No"] = iso["week"]
-        df["Payment Week"] = "W" + df["Due Week No"].astype(str).str.zfill(2) + " - " + df["Due Year"].astype(str)
+        # Prefer Week column from Excel because AP/Treasury already maintains payment week manually.
+        if "Week" in df.columns:
+            df["Payment Week"] = df["Week"].astype(str).str.strip()
+        else:
+            iso = df["Due Date"].dt.isocalendar()
+            df["Due Year"] = iso["year"]
+            df["Due Week No"] = iso["week"]
+            df["Payment Week"] = "W" + df["Due Week No"].astype(str).str.zfill(2) + " - " + df["Due Year"].astype(str)
 
         week_start = df["Due Date"] - pd.to_timedelta(df["Due Date"].dt.weekday, unit="D")
         week_end = week_start + pd.Timedelta(days=6)
@@ -241,7 +245,6 @@ if "Payment Week" in filtered.columns and "Amount" in filtered.columns and not f
             Vendor_Count=("Vendor", "nunique") if "Vendor" in filtered.columns else ("Amount", "count")
         )
         .reset_index()
-        .sort_values(["Payment Week", "Currency"])
     )
 
     week_total = (
@@ -252,8 +255,17 @@ if "Payment Week" in filtered.columns and "Amount" in filtered.columns and not f
             Total_Amount=("Amount", "sum"),
         )
         .reset_index()
-        .sort_values("Payment Week")
     )
+
+    def week_sort_value(x):
+        import re
+        m = re.search(r"\d+", str(x))
+        return int(m.group()) if m else 9999
+
+    weekly_summary["_week_sort"] = weekly_summary["Payment Week"].apply(week_sort_value)
+    week_total["_week_sort"] = week_total["Payment Week"].apply(week_sort_value)
+    weekly_summary = weekly_summary.sort_values(["_week_sort", "Currency"]).drop(columns=["_week_sort"])
+    week_total = week_total.sort_values("_week_sort").drop(columns=["_week_sort"])
 
     c1, c2 = st.columns([1.2, 1])
 
