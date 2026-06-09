@@ -1,7 +1,5 @@
 import io
-import re
-from datetime import date, datetime, timedelta
-from urllib.parse import urlparse
+from datetime import date
 
 import pandas as pd
 import plotly.express as px
@@ -16,7 +14,7 @@ st.set_page_config(
 )
 
 st.title("💸 Payment Tracker Dashboard")
-st.caption("AP MD Import | Principal Payment Monitoring | SharePoint Excel-based dashboard")
+st.caption("AP MD Import | Principal Payment Monitoring | Weekly Payment Planning")
 
 
 # =========================
@@ -24,7 +22,6 @@ st.caption("AP MD Import | Principal Payment Monitoring | SharePoint Excel-based
 # =========================
 
 def excel_serial_to_datetime(series: pd.Series) -> pd.Series:
-    """Convert Excel serial dates or normal date strings into pandas datetime."""
     numeric = pd.to_numeric(series, errors="coerce")
     converted_numeric = pd.to_datetime(numeric, unit="D", origin="1899-12-30", errors="coerce")
     converted_text = pd.to_datetime(series, errors="coerce")
@@ -32,7 +29,6 @@ def excel_serial_to_datetime(series: pd.Series) -> pd.Series:
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Clean column names so dashboard can handle small naming differences."""
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -73,10 +69,27 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
         df["Due Status"] = df["Days to Due"].apply(due_bucket)
         df["Due Month Dashboard"] = df["Due Date"].dt.strftime("%b-%Y")
+
+        # Weekly planning columns
+        iso = df["Due Date"].dt.isocalendar()
+        df["Due Year"] = iso["year"]
+        df["Due Week No"] = iso["week"]
+        df["Payment Week"] = "W" + df["Due Week No"].astype(str).str.zfill(2) + " - " + df["Due Year"].astype(str)
+
+        week_start = df["Due Date"] - pd.to_timedelta(df["Due Date"].dt.weekday, unit="D")
+        week_end = week_start + pd.Timedelta(days=6)
+        df["Week Range"] = week_start.dt.strftime("%d %b") + " - " + week_end.dt.strftime("%d %b %Y")
     else:
         df["Days to Due"] = None
         df["Due Status"] = "No Due Date"
         df["Due Month Dashboard"] = None
+        df["Payment Week"] = "No Due Date"
+        df["Week Range"] = "No Due Date"
+
+    if "Week" in df.columns:
+        df["Source Week"] = df["Week"].astype(str)
+    else:
+        df["Source Week"] = df["Payment Week"]
 
     if "PIC" not in df.columns:
         df["PIC"] = "Not Available"
@@ -85,7 +98,6 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def sharepoint_to_download_url(url: str) -> str:
-    """Try to convert a SharePoint sharing URL into downloadable format."""
     if not url:
         return url
     if "download=1" in url:
@@ -117,7 +129,7 @@ def load_from_uploaded_file(uploaded_file) -> pd.DataFrame:
 
 
 # =========================
-# Sidebar data source
+# Data source
 # =========================
 
 st.sidebar.header("Data Source")
@@ -161,14 +173,9 @@ if raw_df is None:
 
 df = normalize_columns(raw_df)
 
-required_cols = ["Due Date", "Vendor", "Amount", "Currency"]
-missing = [c for c in required_cols if c not in df.columns]
-if missing:
-    st.warning(f"Kolom penting belum ditemukan: {', '.join(missing)}. Dashboard tetap ditampilkan sebisanya.")
-
 
 # =========================
-# Sidebar filters
+# Filters
 # =========================
 
 st.sidebar.header("Filters")
@@ -184,6 +191,7 @@ selected_brand = multiselect_filter("Brand", "Brand")
 selected_currency = multiselect_filter("Currency", "Currency")
 selected_vendor = multiselect_filter("Vendor", "Vendor")
 selected_status = multiselect_filter("Due Status", "Due Status")
+selected_week = multiselect_filter("Payment Week", "Payment Week")
 
 filtered = df.copy()
 
@@ -193,6 +201,7 @@ for col, selected in [
     ("Currency", selected_currency),
     ("Vendor", selected_vendor),
     ("Due Status", selected_status),
+    ("Payment Week", selected_week),
 ]:
     if selected is not None and col in filtered.columns:
         filtered = filtered[filtered[col].isin(selected)]
@@ -201,10 +210,6 @@ for col, selected in [
 # =========================
 # KPI cards
 # =========================
-
-today = pd.Timestamp(date.today())
-end_7_days = today + pd.Timedelta(days=7)
-end_30_days = today + pd.Timedelta(days=30)
 
 total_invoice = len(filtered)
 total_amount = filtered["Amount"].sum() if "Amount" in filtered.columns else 0
@@ -221,8 +226,99 @@ kpi5.metric("Due ≤ 30 Days", f"{due_30_count:,}")
 
 
 # =========================
-# Charts
+# Weekly Payment Summary
 # =========================
+
+st.header("📅 Weekly Payment Summary")
+
+if "Payment Week" in filtered.columns and "Amount" in filtered.columns and not filtered.empty:
+    weekly_summary = (
+        filtered
+        .groupby(["Payment Week", "Week Range", "Currency"], dropna=False)
+        .agg(
+            Invoice_Count=("Amount", "count"),
+            Total_Amount=("Amount", "sum"),
+            Vendor_Count=("Vendor", "nunique") if "Vendor" in filtered.columns else ("Amount", "count")
+        )
+        .reset_index()
+        .sort_values(["Payment Week", "Currency"])
+    )
+
+    week_total = (
+        filtered
+        .groupby(["Payment Week", "Week Range"], dropna=False)
+        .agg(
+            Invoice_Count=("Amount", "count"),
+            Total_Amount=("Amount", "sum"),
+        )
+        .reset_index()
+        .sort_values("Payment Week")
+    )
+
+    c1, c2 = st.columns([1.2, 1])
+
+    with c1:
+        st.subheader("Payment Plan by Week")
+        fig = px.bar(
+            week_total,
+            x="Payment Week",
+            y="Total_Amount",
+            text="Invoice_Count",
+            hover_data=["Week Range", "Invoice_Count"],
+        )
+        fig.update_layout(height=380, xaxis_title="Payment Week", yaxis_title="Total Amount")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with c2:
+        st.subheader("Weekly Amount by Currency")
+        fig = px.bar(
+            weekly_summary,
+            x="Payment Week",
+            y="Total_Amount",
+            color="Currency",
+            hover_data=["Week Range", "Invoice_Count", "Vendor_Count"],
+        )
+        fig.update_layout(height=380, xaxis_title="Payment Week", yaxis_title="Total Amount")
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("Weekly Summary Table")
+    st.dataframe(
+        weekly_summary.rename(columns={
+            "Invoice_Count": "Invoice Count",
+            "Total_Amount": "Total Amount",
+            "Vendor_Count": "Vendor Count",
+        }),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    available_weeks = week_total["Payment Week"].tolist()
+    selected_detail_week = st.selectbox("Lihat detail invoice untuk week:", available_weeks)
+
+    detail_week_df = filtered[filtered["Payment Week"] == selected_detail_week].copy()
+
+    st.subheader(f"Invoice Detail - {selected_detail_week}")
+    detail_cols = [
+        "Due Date", "Week Range", "Invoice No", "Vendor", "Company", "Brand",
+        "Currency", "Amount", "Days to Due", "Due Status"
+    ]
+    detail_cols = [c for c in detail_cols if c in detail_week_df.columns]
+
+    display_week = detail_week_df[detail_cols].copy()
+    if "Due Date" in display_week.columns:
+        display_week["Due Date"] = display_week["Due Date"].dt.strftime("%d-%b-%Y")
+
+    st.dataframe(display_week, use_container_width=True, hide_index=True)
+
+else:
+    st.info("Data weekly summary belum tersedia.")
+
+
+# =========================
+# Other charts
+# =========================
+
+st.header("📊 Dashboard Overview")
 
 left, right = st.columns(2)
 
@@ -271,12 +367,14 @@ else:
 # Detail table
 # =========================
 
-st.subheader("Invoice Detail")
+st.header("📋 Full Invoice Detail")
 
 default_cols = [
     "Posting Date",
     "Document Date",
     "Due Date",
+    "Payment Week",
+    "Week Range",
     "Due Month",
     "Week",
     "Invoice No",
@@ -309,4 +407,4 @@ st.download_button(
     mime="text/csv",
 )
 
-st.caption("Note: SharePoint direct refresh depends on company permission/authentication setting. If blocked, use upload mode for MVP or set up Microsoft Graph API for secure auto-refresh.")
+st.caption("Refresh MVP: update Excel di SharePoint, download file terbaru, lalu upload ulang ke dashboard. Direct SharePoint refresh bisa jadi phase berikutnya.")
